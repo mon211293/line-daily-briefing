@@ -39,7 +39,8 @@ function buildTextSummary(dateLabel: string, events: CalendarEvent[]): string {
   if (events.length === 0) {
     lines.push("今日沒有行程");
   } else {
-    lines.push("【今日行事曆】", ...events.map(formatEventLine));
+    lines.push("【今日行事曆】", "");
+    lines.push(events.map(formatEventLine).join("\n\n"));
   }
 
   return lines.join("\n");
