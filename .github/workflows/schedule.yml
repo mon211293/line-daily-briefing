@@ -1,0 +1,23 @@
+name: Trigger LINE briefing functions
+
+on:
+  schedule:
+    - cron: "0 23 * * *" # 07:00 Asia/Taipei 每日行事曆推播
+    - cron: "*/15 * * * *" # 每 15 分鐘檢查即將開始的活動
+  workflow_dispatch:
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger dailyBriefing
+        if: github.event.schedule == '0 23 * * *' || github.event_name == 'workflow_dispatch'
+        run: |
+          curl -sf -X POST "https://dailybriefing-tl6b6jk2mq-de.a.run.app/" \
+            -H "x-trigger-secret: ${{ secrets.TRIGGER_SECRET }}"
+
+      - name: Trigger eventReminder
+        if: github.event.schedule == '*/15 * * * *' || github.event_name == 'workflow_dispatch'
+        run: |
+          curl -sf -X POST "https://eventreminder-tl6b6jk2mq-de.a.run.app/" \
+            -H "x-trigger-secret: ${{ secrets.TRIGGER_SECRET }}"

@@ -1,0 +1,30 @@
+{
+  "name": "line-daily-briefing",
+  "version": "1.0.0",
+  "private": true,
+  "description": "每日行事曆與財經資訊推播,透過 LINE 官方帳號發送純文字訊息",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "gcp-build": "tsc -p tsconfig.json",
+    "watch": "tsc -p tsconfig.json --watch",
+    "start:daily": "npm run build && functions-framework --target=dailyBriefing --source=dist/index.js",
+    "start:reminder": "npm run build && functions-framework --target=eventReminder --source=dist/index.js",
+    "deploy:daily": "gcloud functions deploy dailyBriefing --gen2 --runtime=nodejs20 --region=asia-east1 --source=. --entry-point=dailyBriefing --trigger-http --no-allow-unauthenticated",
+    "deploy:reminder": "gcloud functions deploy eventReminder --gen2 --runtime=nodejs20 --region=asia-east1 --source=. --entry-point=eventReminder --trigger-http --no-allow-unauthenticated"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@google-cloud/firestore": "^7.9.0",
+    "@google-cloud/functions-framework": "^3.4.2",
+    "@google-cloud/secret-manager": "^5.6.0",
+    "@line/bot-sdk": "^9.5.1",
+    "googleapis": "^140.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.0"
+  }
+}
