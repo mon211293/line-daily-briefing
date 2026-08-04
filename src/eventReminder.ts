@@ -5,7 +5,9 @@ import { hasBeenNotified, markNotified } from "./reminderStore";
 import { pushText } from "./line";
 import { isAuthorizedTrigger } from "./httpAuth";
 
-const REMINDER_WINDOW_MINUTES = Number(process.env.REMINDER_WINDOW_MINUTES ?? 60);
+// 觸發來源改成每小時整點掃描一次(GitHub Actions 對 15 分鐘級的高頻排程不可靠,見 workflow 註解),
+// 視窗比掃描間隔多留一些餘裕(75 分鐘 > 60 分鐘),避免行程剛好卡在整點掃描的邊界被漏掉。
+const REMINDER_WINDOW_MINUTES = Number(process.env.REMINDER_WINDOW_MINUTES ?? 75);
 
 function formatReminderText(event: CalendarEvent): string {
   const time = event.start.toLocaleTimeString("zh-TW", {

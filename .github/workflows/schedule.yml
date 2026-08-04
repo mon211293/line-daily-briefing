@@ -3,7 +3,7 @@ name: Trigger LINE briefing functions
 on:
   schedule:
     - cron: "0 23 * * *" # 07:00 Asia/Taipei 每日行事曆推播
-    - cron: "*/15 * * * *" # 每 15 分鐘檢查即將開始的活動
+    - cron: "0 * * * *" # 每小時整點檢查即將開始的活動(GitHub Actions 對高頻率排程不可靠,15 分鐘一次實測會被大量跳過,改成整點)
   workflow_dispatch:
 
 jobs:
@@ -17,7 +17,7 @@ jobs:
             -H "x-trigger-secret: ${{ secrets.TRIGGER_SECRET }}"
 
       - name: Trigger eventReminder
-        if: github.event.schedule == '*/15 * * * *' || github.event_name == 'workflow_dispatch'
+        if: github.event.schedule == '0 * * * *' || github.event_name == 'workflow_dispatch'
         run: |
           curl -sf -X POST "https://eventreminder-tl6b6jk2mq-de.a.run.app/" \
             -H "x-trigger-secret: ${{ secrets.TRIGGER_SECRET }}"
