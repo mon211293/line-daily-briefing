@@ -1,23 +1,28 @@
 # LINE 官方帳號:每日行事曆推播
 
-每天自動推播:今日所有行事曆事件,以及即將開始(1 小時內)的活動提醒,純文字訊息發送到 LINE(個人或群組皆可)。
+每天自動推播:今日所有行事曆事件,以及即將開始(1 小時左右)的活動提醒,純文字訊息發送到 LINE(個人或群組皆可)。
 
 ## 架構
 
 ```
-Cloud Scheduler ──(每天 07:00, Asia/Taipei)──▶ Cloud Function: dailyBriefing
-Cloud Scheduler ──(每 15 分鐘)───────────────▶ Cloud Function: eventReminder
+GitHub Actions (cron) ──(每天 07:00, Asia/Taipei)──▶ Cloud Function: dailyBriefing
+GitHub Actions (cron) ──(每小時整點)───────────────▶ Cloud Function: eventReminder
 ```
 
-- `dailyBriefing`:讀 Google Calendar 當日所有行事曆(不只 primary,包含所有「有勾選顯示」的行事曆)的事件 → LINE 推播純文字摘要
-- `eventReminder`:讀「1 小時內即將開始」的事件(所有行事曆)→ LINE 推播文字提醒(用 Firestore 記錄已提醒過的事件,避免重複;時間窗可用 `REMINDER_WINDOW_MINUTES` 環境變數調整,預設 60)
+- `dailyBriefing`:讀 Google Calendar 當日所有行事曆(不只 primary,包含所有出現在行事曆清單裡的行事曆)的事件 → LINE 推播純文字摘要,行程之間留空行方便閱讀,有地點/備注的行程會附上 📍/📝
+- `eventReminder`:讀「即將開始的事件」(所有行事曆)→ LINE 推播文字提醒(用 Firestore 記錄已提醒過的事件,避免重複)。時間窗用 `REMINDER_WINDOW_MINUTES` 環境變數控制,預設 **75 分鐘**(比整點掃描的間隔多留一點餘裕,避免行程剛好卡在整點掃描的邊界被漏掉)
 
-推播目標(`LINE_TARGET_USER_ID` 這組 Secret)可以是個人 userId,也可以換成群組 groupId——LINE 的 push API 對兩者用法完全相同。若要推到群組,注意 **LINE 平台限制一個群組最多只能有一個官方帳號**,而且該官方帳號要先在 LINE Developers Console →「Messaging API」分頁把「Allow bot to join group chats」打開,才能被邀請進群組。
+**觸發方式是 GitHub Actions,不是 Cloud Scheduler。** 原本用 Cloud Scheduler,但改用 GitHub Actions 是因為一度誤以為 Scheduler 費用有問題(後來沒有實際查證,Scheduler 兩個工作其實在免費額度內)。實測發現 **GitHub Actions 的 cron 對高頻率排程(例如原本用的每 15 分鐘)非常不可靠**——會被跳過、間隔可能拉長到 2~4 小時,所以提醒功能改成每小時整點掃描一次,搭配較寬的時間窗降低漏掉的機率。如果之後想追求更精準的提醒時機,可以考慮換回 Cloud Scheduler(見文末)。
+
+因為 GitHub Actions 沒辦法做 Google OIDC 驗證,兩個 Cloud Function 部署成 `--allow-unauthenticated`(網址公開),改成程式碼內建一組共用密碼(`TRIGGER_SECRET`)保護:請求要帶 `x-trigger-secret` header 或 `?key=` 參數對上,否則回 401。
+
+推播目標(`LINE_TARGET_USER_ID` 這組 Secret)可以是個人 userId,也可以是群組 groupId——LINE 的 push API 對兩者用法完全相同。若要推到群組,注意 **LINE 平台限制一個群組最多只能有一個官方帳號**,而且該官方帳號要先在 LINE Developers Console →「Messaging API」分頁把「Allow bot to join group chats」打開,才能被邀請進群組。
 
 ## 前置準備
 
 - 已安裝並登入 `gcloud` CLI,且有一個已啟用帳單的 GCP 專案
 - 已申請好 LINE Official Account,並取得 Messaging API 的 Channel Access Token / Channel Secret
+- 一個 GitHub 帳號(裝 `gh` CLI 並登入),用來跑排程用的 Actions
 - Node.js 20+
 
 ```bash
@@ -29,7 +34,6 @@ gcloud services enable \
   cloudfunctions.googleapis.com \
   cloudbuild.googleapis.com \
   run.googleapis.com \
-  cloudscheduler.googleapis.com \
   secretmanager.googleapis.com \
   firestore.googleapis.com
 ```
@@ -73,6 +77,7 @@ printf '%s' "<USER_ID_或_GROUP_ID>"       | gcloud secrets create LINE_TARGET_U
 printf '%s' "<GOOGLE_CLIENT_ID>"          | gcloud secrets create GOOGLE_OAUTH_CLIENT_ID --data-file=-
 printf '%s' "<GOOGLE_CLIENT_SECRET>"      | gcloud secrets create GOOGLE_OAUTH_CLIENT_SECRET --data-file=-
 printf '%s' "<GOOGLE_REFRESH_TOKEN>"      | gcloud secrets create GOOGLE_OAUTH_REFRESH_TOKEN --data-file=-
+printf '%s' "$(openssl rand -hex 32)"     | gcloud secrets create TRIGGER_SECRET --data-file=-
 ```
 
 Cloud Functions 執行時的服務帳號需要 `roles/secretmanager.secretAccessor`。找出執行服務帳號(預設是 `${PROJECT_NUMBER}-compute@developer.gserviceaccount.com`)並授權:
@@ -81,7 +86,8 @@ Cloud Functions 執行時的服務帳號需要 `roles/secretmanager.secretAccess
 export RUNTIME_SA="$(gcloud projects describe "$GCP_PROJECT_ID" --format='value(projectNumber)')-compute@developer.gserviceaccount.com"
 
 for secret in LINE_CHANNEL_ACCESS_TOKEN LINE_CHANNEL_SECRET LINE_TARGET_USER_ID \
-              GOOGLE_OAUTH_CLIENT_ID GOOGLE_OAUTH_CLIENT_SECRET GOOGLE_OAUTH_REFRESH_TOKEN; do
+              GOOGLE_OAUTH_CLIENT_ID GOOGLE_OAUTH_CLIENT_SECRET GOOGLE_OAUTH_REFRESH_TOKEN \
+              TRIGGER_SECRET; do
   gcloud secrets add-iam-policy-binding "$secret" \
     --member="serviceAccount:${RUNTIME_SA}" --role=roles/secretmanager.secretAccessor
 done
@@ -90,7 +96,7 @@ gcloud projects add-iam-policy-binding "$GCP_PROJECT_ID" \
   --member="serviceAccount:${RUNTIME_SA}" --role=roles/datastore.user
 ```
 
-> 之後要換推播對象(例如從個人改成群組),不用重新部署——直接 `printf '%s' "<新的ID>" | gcloud secrets versions add LINE_TARGET_USER_ID --data-file=-` 加一個新版本,程式碼永遠讀最新版本。
+> 之後要換推播對象(例如從個人改成群組),不用重新部署——直接 `printf '%s' "<新的ID>" | gcloud secrets versions add LINE_TARGET_USER_ID --data-file=-` 加一個新版本,程式碼永遠讀最新版本,沒有做跨 invocation 快取。
 
 ## 本地開發
 
@@ -107,60 +113,52 @@ npm run start:reminder  # eventReminder
 
 ## 部署
 
+兩個 function 都部署成公開網址,靠程式碼裡的 `TRIGGER_SECRET` 檢查擋掉未授權請求:
+
 ```bash
 gcloud functions deploy dailyBriefing \
   --gen2 --runtime=nodejs20 --region="$REGION" --source=. \
-  --entry-point=dailyBriefing --trigger-http --no-allow-unauthenticated \
+  --entry-point=dailyBriefing --trigger-http --allow-unauthenticated \
   --set-env-vars="GCP_PROJECT_ID=${GCP_PROJECT_ID}"
 
 gcloud functions deploy eventReminder \
   --gen2 --runtime=nodejs20 --region="$REGION" --source=. \
-  --entry-point=eventReminder --trigger-http --no-allow-unauthenticated \
+  --entry-point=eventReminder --trigger-http --allow-unauthenticated \
   --set-env-vars="GCP_PROJECT_ID=${GCP_PROJECT_ID}"
 ```
 
-## 建立排程(Cloud Scheduler)
+## 建立排程(GitHub Actions)
 
-兩個 function 都設定 `--no-allow-unauthenticated`,所以 Scheduler 要用一個有 `roles/run.invoker` 的服務帳號,以 OIDC 身分呼叫:
+1. 把這個 repo push 到 GitHub(建議 **公開 repo**——公開 repo 的 Actions 分鐘數完全免費不設上限;私有 repo 每月只有 2000 分鐘免費,以每小時觸發的頻率通常夠用,但如果之後又想拉高頻率就可能超額)
+2. 在 repo 設定一個 Secret:
+   ```bash
+   gh secret set TRIGGER_SECRET --body "<跟 GCP Secret Manager 裡 TRIGGER_SECRET 一樣的值>"
+   ```
+3. `.github/workflows/schedule.yml` 已經寫好兩個 cron(`0 23 * * *` 對應台北 07:00 每日推播,`0 * * * *` 每小時整點提醒檢查),把裡面的 Cloud Run URL 換成你自己的兩個函式網址
+4. 手動測試:
+   ```bash
+   gh workflow run schedule.yml
+   gh run list --limit 3
+   ```
 
-```bash
-gcloud iam service-accounts create line-briefing-scheduler \
-  --display-name="LINE Briefing Scheduler Invoker"
-export SCHEDULER_SA="line-briefing-scheduler@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
-
-export DAILY_URL="$(gcloud functions describe dailyBriefing --gen2 --region="$REGION" --format='value(serviceConfig.uri)')"
-export REMINDER_URL="$(gcloud functions describe eventReminder --gen2 --region="$REGION" --format='value(serviceConfig.uri)')"
-
-gcloud run services add-iam-policy-binding dailybriefing --region="$REGION" \
-  --member="serviceAccount:${SCHEDULER_SA}" --role=roles/run.invoker
-gcloud run services add-iam-policy-binding eventreminder --region="$REGION" \
-  --member="serviceAccount:${SCHEDULER_SA}" --role=roles/run.invoker
-
-gcloud scheduler jobs create http daily-briefing-job \
-  --location="$REGION" --schedule="0 7 * * *" --time-zone="Asia/Taipei" \
-  --uri="$DAILY_URL" --http-method=POST \
-  --oidc-service-account-email="$SCHEDULER_SA" --oidc-token-audience="$DAILY_URL"
-
-gcloud scheduler jobs create http event-reminder-job \
-  --location="$REGION" --schedule="*/15 * * * *" --time-zone="Asia/Taipei" \
-  --uri="$REMINDER_URL" --http-method=POST \
-  --oidc-service-account-email="$SCHEDULER_SA" --oidc-token-audience="$REMINDER_URL"
-```
-
-> 注意:`gcloud run services ...` 要用小寫的 Cloud Run 服務名稱(`dailybriefing` / `eventreminder`),跟 Cloud Functions 顯示的大小寫名稱不同。
+> 如果想追求提醒的精準時機(例如真的要 15 分鐘級別的頻率),GitHub Actions 的 cron 不適合——可以改回 Cloud Scheduler(`gcloud scheduler jobs create http ...`,搭配 `--oidc-service-account-email` 走 Google 身分驗證,或沿用現在的 `TRIGGER_SECRET` 方式,把 `--headers="x-trigger-secret=..."` 帶給 Scheduler 的 HTTP target)。Cloud Scheduler 每月前 3 個工作免費,精準度遠優於 GitHub Actions。
 
 ## 驗證
 
 ```bash
-# 手動觸發一次,確認 LINE 有收到文字訊息
-gcloud scheduler jobs run daily-briefing-job --location="$REGION"
-gcloud functions logs read dailyBriefing --region="$REGION" --gen2 --limit=50
+# 直接 curl 觸發,確認 LINE 有收到文字訊息
+curl -X POST "<dailyBriefing 網址>" -H "x-trigger-secret: <TRIGGER_SECRET>"
+curl -X POST "<eventReminder 網址>" -H "x-trigger-secret: <TRIGGER_SECRET>"
 
-gcloud scheduler jobs run event-reminder-job --location="$REGION"
+gcloud functions logs read dailyBriefing --region="$REGION" --gen2 --limit=50
 gcloud functions logs read eventReminder --region="$REGION" --gen2 --limit=50
+
+# 或直接看 GitHub Actions 執行紀錄
+gh run list --limit 10
 ```
 
 ## 補充
 
 - `reminded-events`(Firestore)只用來去重,沒有自動清理;若想省空間,可在該 collection 的 `expireAt` 欄位上設定 [TTL 政策](https://cloud.google.com/firestore/docs/ttl)。
-- 若之後想調整提醒時間窗(預設事件開始前 60 分鐘),部署時加上 `--set-env-vars=...,REMINDER_WINDOW_MINUTES=30`。
+- 若之後想調整提醒時間窗,部署時加上 `--set-env-vars=...,REMINDER_WINDOW_MINUTES=<分鐘數>`;調整時記得跟 GitHub Actions 的掃描頻率一起考慮(窗口要略大於掃描間隔,避免邊界漏抓)。
+- **臨時新增的行程,如果距離開始時間不到一次掃描間隔(目前是 1 小時),可能來不及被提醒到**——這是低頻率掃描的固有限制,不是 bug。
