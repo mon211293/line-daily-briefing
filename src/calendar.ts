@@ -105,5 +105,11 @@ export async function getUpcomingEvents(config: AppConfig, withinMinutes: number
     timeMax: horizon.toISOString(),
   });
 
-  return events.filter((event) => !event.allDay);
+  // Google Calendar API 的 timeMin/timeMax 是用「結束時間晚於 timeMin」+「開始時間早於 timeMax」
+  // 篩選,不是「開始時間介於區間內」——已經開始但還沒結束的長行程也會被抓進來。
+  // 這裡再明確過濾一次,只留下開始時間真的落在 [now, horizon] 之間的行程,避免把已經開始
+  // 一段時間、只是還沒結束的行程誤判成「即將開始」而發出遲到的提醒。
+  return events.filter(
+    (event) => !event.allDay && event.start.getTime() >= now.getTime() && event.start.getTime() <= horizon.getTime()
+  );
 }
